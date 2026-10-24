@@ -40,7 +40,10 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
 const sessions = new Map();
 const socketsByUser = new Map();
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const allowedOrigins = new Set((process.env.ALLOWED_ORIGINS || 'http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000').split(',').map((origin) => origin.trim()).filter(Boolean));
+const allowedOrigins = new Set([
+  ...(process.env.ALLOWED_ORIGINS || 'http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000').split(',').map((origin) => origin.trim()).filter(Boolean),
+  ...(process.env.LAN_IP ? [`https://${process.env.LAN_IP.trim()}:5173`] : []),
+]);
 
 function parseCookies(header = '') {
   const cookies = {};
@@ -291,6 +294,6 @@ if (existsSync(distDir)) {
 
 const port = Number(process.env.PORT || 3000);
 httpServer.listen(port, '0.0.0.0', () => {
-  console.log(`QuantumSafe Chat API + WebSocket relay listening on http://127.0.0.1:${port}`);
+  console.log(`QuantumSafe Chat API + WebSocket relay listening on port ${port}`);
   console.log('Demo only: messages are encrypted in the browser; this is not a production-secure messenger.');
 });

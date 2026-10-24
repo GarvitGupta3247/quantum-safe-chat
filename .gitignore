@@ -4,3 +4,6 @@ data/store.json
 data/store.json.tmp
 .env
 .DS_Store
+
+# Local HTTPS certificates for LAN demos; never commit private keys.
+certs/

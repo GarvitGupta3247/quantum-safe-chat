@@ -1,15 +1,17 @@
 {
   "name": "quantumsafe-chat-poc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Minimal browser messaging proof of concept using ML-KEM-768 and AES-GCM.",
+  "description": "Experimental post-quantum messaging lab with ML-KEM diagnostics and benchmarks.",
   "scripts": {
     "dev": "concurrently -k \"npm:server:dev\" \"npm:web:dev\"",
     "server:dev": "node --watch server/index.js",
-    "web:dev": "vite --host 0.0.0.0",
+    "web:dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "web:lan": "vite --host 0.0.0.0",
+    "dev:lan": "concurrently -k \"npm:server:dev\" \"npm:web:lan\""
   },
   "dependencies": {
     "express": "^5.1.0",
