@@ -290,7 +290,7 @@ if (existsSync(distDir)) {
 }
 
 const port = Number(process.env.PORT || 3000);
-httpServer.listen(port, '127.0.0.1', () => {
+httpServer.listen(port, '0.0.0.0', () => {
   console.log(`QuantumSafe Chat API + WebSocket relay listening on http://127.0.0.1:${port}`);
   console.log('Demo only: messages are encrypted in the browser; this is not a production-secure messenger.');
 });
