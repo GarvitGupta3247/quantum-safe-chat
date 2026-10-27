@@ -1,6 +1,6 @@
 import express from 'express';
 import { createServer } from 'node:http';
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,13 +33,29 @@ function saveStore() {
 }
 
 const app = express();
+// Render places the app behind one trusted reverse proxy; this enables client-IP-aware throttling.
+app.set('trust proxy', 1);
 app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+  }
+  next();
+});
 app.use(express.json({ limit: '256kb' }));
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
 const sessions = new Map();
 const socketsByUser = new Map();
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 8;
+const LOGIN_BLOCK_MS = 15 * 60 * 1000;
+const loginFailures = new Map();
 const allowedOrigins = new Set([
   ...(process.env.ALLOWED_ORIGINS || 'http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000').split(',').map((origin) => origin.trim()).filter(Boolean),
   ...(process.env.LAN_IP ? [`https://${process.env.LAN_IP.trim()}:5173`] : []),
@@ -121,6 +137,46 @@ function publicUser(username, user) {
   return { username, kemPublicKey: user.kemPublicKey };
 }
 
+function clientIp(req) {
+  return req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function loginBlockRemaining(req) {
+  const entry = loginFailures.get(clientIp(req));
+  if (!entry) return 0;
+  const now = Date.now();
+  if (entry.blockedUntil > now) return entry.blockedUntil - now;
+  if (now - entry.windowStarted >= LOGIN_WINDOW_MS || (entry.blockedUntil && entry.blockedUntil <= now)) {
+    loginFailures.delete(clientIp(req));
+  }
+  return 0;
+}
+
+function recordLoginFailure(req) {
+  const key = clientIp(req);
+  const now = Date.now();
+  let entry = loginFailures.get(key);
+  if (!entry || now - entry.windowStarted >= LOGIN_WINDOW_MS || (entry.blockedUntil && entry.blockedUntil <= now)) {
+    entry = { windowStarted: now, failures: 0, blockedUntil: 0 };
+  }
+  entry.failures += 1;
+  if (entry.failures >= LOGIN_MAX_FAILURES) entry.blockedUntil = now + LOGIN_BLOCK_MS;
+  loginFailures.set(key, entry);
+
+  // Avoid unbounded growth if many source IPs hit this demo service.
+  if (loginFailures.size > 5000) {
+    for (const [ip, record] of loginFailures) {
+      if (record.windowStarted + LOGIN_WINDOW_MS < now || (record.blockedUntil && record.blockedUntil < now)) loginFailures.delete(ip);
+      if (loginFailures.size <= 4000) break;
+    }
+  }
+}
+
+function clearLoginFailures(req) {
+  loginFailures.delete(clientIp(req));
+}
+
+
 app.get('/api/health', (_req, res) => res.json({ ok: true, crypto: 'ML-KEM-768 + HKDF-SHA-256 + AES-256-GCM' }));
 
 app.post('/api/register', (req, res) => {
@@ -150,12 +206,20 @@ app.post('/api/register', (req, res) => {
 });
 
 app.post('/api/login', (req, res) => {
+  const blockedForMs = loginBlockRemaining(req);
+  if (blockedForMs > 0) {
+    res.setHeader('Retry-After', String(Math.ceil(blockedForMs / 1000)));
+    return res.status(429).json({ error: 'Too many failed login attempts. Please wait 15 minutes before trying again.' });
+  }
+
   const { username: rawUsername, password } = req.body ?? {};
   const username = typeof rawUsername === 'string' ? rawUsername.trim().toLowerCase() : '';
   const user = store.users[username];
   if (!user || typeof password !== 'string' || !passwordMatches(password, user)) {
+    recordLoginFailure(req);
     return res.status(401).json({ error: 'Incorrect username or password.' });
   }
+  clearLoginFailures(req);
   createSession(username, res);
   res.json({ username, kemPublicKey: user.kemPublicKey });
 });
@@ -208,6 +272,13 @@ function validEnvelope(envelope) {
     && isCanonicalBase64(envelope.ciphertext, 16, 150_000);
 }
 
+// Fingerprint a recipient's encrypted envelope to catch repeated delivery of the same copy.
+// This is duplicate-envelope detection, not a complete protocol-level replay defense.
+function fingerprintRecipientEnvelope(sender, recipient, envelopes) {
+  const canonical = { sender, recipient, envelope: envelopes?.[recipient] };
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
 function safeSend(socket, message) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
@@ -253,10 +324,22 @@ wss.on('connection', (socket) => {
       return safeSend(socket, { type: 'error', error: 'Invalid encrypted envelope. No message was saved.' });
     }
 
+    const envelopeFingerprint = fingerprintRecipientEnvelope(username, recipient, envelopes);
+    const duplicateEnvelope = store.messages.some((existing) => {
+      if (existing.sender !== username || existing.recipient !== recipient) return false;
+      const fingerprint = existing.envelopeFingerprint
+        || fingerprintRecipientEnvelope(existing.sender, existing.recipient, existing.envelopes);
+      return fingerprint === envelopeFingerprint;
+    });
+    if (duplicateEnvelope) {
+      return safeSend(socket, { type: 'error', error: 'Duplicate encrypted envelope rejected.' });
+    }
+
     const message = {
       id: randomUUID(),
       sender: username,
       recipient,
+      envelopeFingerprint,
       envelopes: { [username]: envelopes[username], [recipient]: envelopes[recipient] },
       createdAt: new Date().toISOString(),
     };

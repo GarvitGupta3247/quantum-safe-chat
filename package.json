@@ -1,9 +1,9 @@
 {
   "name": "quantumsafe-chat-poc",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Experimental post-quantum messaging lab with ML-KEM diagnostics and benchmarks.",
+  "description": "Minimal experimental post-quantum messaging prototype with a warm UI.",
   "scripts": {
     "dev": "concurrently -k \"npm:server:dev\" \"npm:web:dev\"",
     "server:dev": "node --watch server/index.js",

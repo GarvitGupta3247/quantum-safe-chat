@@ -1,40 +1,32 @@
-# QuantumSafe Chat — Mentor Demo Script (Phase 1.5)
+# QuantumSafe Chat — Simple Demo Guide
 
-A suggested 5–8 minute walkthrough. Use two separate browser profiles/devices and create separate accounts on the same deployed origin.
+## 60-second walkthrough
 
-## 1. Establish that this is a live implementation
+1. Register a test account and point out that an ML-KEM-768 keypair is generated in the browser.
+2. Register a second account in a separate browser profile.
+3. Send a message in both directions.
+4. Explain the flow: ML-KEM encapsulates a shared secret for each message copy; HKDF-SHA-256 derives an AES key; AES-256-GCM encrypts/authenticates the message; the server relays encrypted envelopes.
+5. If asked about security boundaries, state that private keys remain in browser localStorage but are currently unencrypted, public keys are not authenticated, and a full forward-secrecy protocol is planned for Phase 2. The backend also rejects duplicate recipient envelopes already present in retained history, but this is not a complete replay defense.
 
-1. Log in to Alice in one browser and Bob in another.
-2. Open **Crypto activity** in both browsers.
-3. Point out the actual ML-KEM-768 public-key byte count and SHA-256 fingerprint. The public key can be expanded as Base64; private keys and raw shared secrets are intentionally never printed.
-4. Send one message from Alice to Bob.
-5. Compare the `envelope ref` and abbreviated `shared-secret SHA-256` fingerprint in Alice's **ML-KEM-768 encapsulation** event against Bob's **ML-KEM-768 decapsulation** event for that same envelope. Matching values demonstrate that both sides derived the same shared secret from the corresponding KEM ciphertext. This is diagnostic evidence only; it does not authenticate Alice or Bob.
-6. Show the HKDF-SHA-256 and AES-256-GCM events and their measured execution times and byte counts.
-7. Export the event log CSV if the evaluator wants the trace.
+## Useful source locations
 
-## 2. Demonstrate tamper detection
+- `src/main.js`: registration UI, browser key generation, KEM encapsulation/decapsulation, HKDF derivation, AES-GCM encrypt/decrypt, websocket client, send/receive message handling.
+- `server/index.js`: Express API, scrypt password hashes, in-memory sessions, login throttling, envelope validation, WebSocket relay and production static file serving.
+- `src/style.css`: Ember & Brass color palette and layout.
+- `package.json`: dependencies and run/build scripts.
+- `vite.config.js`: Vite development server and API/WebSocket proxies.
 
-1. Open **Attack lab** and select **Run security tests**.
-2. The first test creates a real local AES-GCM encrypted envelope, flips a bit in the ciphertext/tag, and tries to decrypt it. The expected result is **PASS — rejected**.
-3. The second test encrypts to a different ML-KEM public key and attempts to decrypt with the account's existing private key. The expected result is **PASS — decryption rejected**.
-4. Explain that these tests demonstrate authenticated-encryption and wrong-key rejection, not comprehensive security certification.
+## Security questions to answer honestly
 
-## 3. Demonstrate measured performance
+- ML-KEM-768 establishes a shared secret; it is not itself a bulk message-encryption algorithm.
+- HKDF turns the shared secret into a symmetric key; AES-GCM protects the message and authenticates its ciphertext.
+- The server is designed to relay encrypted message envelopes rather than plaintext bodies.
+- No public-key authentication means a malicious server could substitute a contact key.
+- Fresh encapsulation alone is not a full forward-secrecy protocol.
+- Local JSON storage and in-memory sessions are demo-level and can lose data/session state after a hosting restart.
+- Basic login throttling is in-memory, per app instance, and resets on restart.
 
-1. Open **Benchmarks** and click **Run benchmarks · 100 iterations**.
-2. Wait for actual browser operations to finish.
-3. Explain median, mean and standard deviation. The benchmark includes ML-KEM-768 key generation, encapsulation, decapsulation and a combined exchange; X25519 timings are included only when supported by the browser; HKDF and AES-GCM use a 1 KiB test payload.
-4. Export the CSV and preserve it with the browser/device details for the report.
-5. Do not claim that the timings are universal or perfectly apples-to-apples; device, browser, crypto implementation and operation scope affect results.
+Use only test accounts and non-sensitive messages. This project has not been independently audited.
 
-## 4. State the current limitations clearly
 
-- ML-DSA identity signatures and cryptographic public-key identity verification are not implemented yet.
-- Replay protection and a reviewed Double Ratchet / forward-secrecy design are not implemented.
-- The ML-KEM private key is stored unencrypted in browser localStorage for this educational prototype.
-- Password/session/database handling and deployment storage have not received a production security audit.
-- Render's ephemeral filesystem can lose the JSON account/message store after instance replacement/redeploy; this prototype should be considered demo data only unless persistent storage is configured.
-
-## One-sentence project summary
-
-“Phase 1.5 turns our ML-KEM-based chat proof of concept into an observable experiment: it records real cryptographic operations, tests authenticated-ciphertext rejection, and measures post-quantum versus classical key-agreement costs; Phase 2 will focus on authenticated identity and forward secrecy.”
+Composer tip: press **Enter** to send a message, or **Shift+Enter** to start a new line.
