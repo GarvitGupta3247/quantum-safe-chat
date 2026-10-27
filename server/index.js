@@ -1,23 +1,34 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFileSync, chmodSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
-const dataDir = join(projectRoot, 'data');
+// Point DATA_DIR at a mounted persistent volume in production when one is configured.
+const dataDir = resolve(process.env.DATA_DIR || join(projectRoot, 'data'));
 const dataFile = join(dataDir, 'store.json');
-mkdirSync(dataDir, { recursive: true });
+const legacyDataFile = join(projectRoot, 'data', 'store.json');
+mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+// Best-effort one-time copy when DATA_DIR is changed to a persistent mount and the old file is still present.
+if (dataFile !== legacyDataFile && !existsSync(dataFile) && existsSync(legacyDataFile)) {
+  copyFileSync(legacyDataFile, dataFile);
+  chmodSync(dataFile, 0o600);
+}
 
 function loadStore() {
-  if (!existsSync(dataFile)) return { users: {}, messages: [] };
+  if (!existsSync(dataFile)) return { users: Object.create(null), messages: [] };
   try {
     const parsed = JSON.parse(readFileSync(dataFile, 'utf8'));
+    const users = Object.create(null);
+    if (parsed.users && typeof parsed.users === 'object' && !Array.isArray(parsed.users)) {
+      for (const [username, user] of Object.entries(parsed.users)) users[username] = user;
+    }
     return {
-      users: parsed.users && typeof parsed.users === 'object' ? parsed.users : {},
+      users,
       messages: Array.isArray(parsed.messages) ? parsed.messages : [],
     };
   } catch {
@@ -41,9 +52,16 @@ app.use((_req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:");
   if (process.env.NODE_ENV === 'production') {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000');
   }
+  next();
+});
+// Authenticated API responses contain account data or ciphertext; do not cache them in browsers or proxies.
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
   next();
 });
 app.use(express.json({ limit: '256kb' }));
@@ -101,8 +119,13 @@ function setSessionCookie(res, token) {
 }
 
 function createSession(username, res) {
+  const now = Date.now();
+  // Opportunistically remove expired entries so abandoned sessions do not grow the in-memory map forever.
+  for (const [token, session] of sessions) {
+    if (session.expiresAt <= now) sessions.delete(token);
+  }
   const token = randomBytes(32).toString('base64url');
-  sessions.set(token, { username, expiresAt: Date.now() + SESSION_TTL_MS });
+  sessions.set(token, { username, expiresAt: now + SESSION_TTL_MS });
   setSessionCookie(res, token);
 }
 
@@ -115,6 +138,19 @@ function isCanonicalBase64(value, minBytes, maxBytes = minBytes) {
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return false;
   const bytes = Buffer.from(value, 'base64');
   return bytes.length >= minBytes && bytes.length <= maxBytes && bytes.toString('base64') === value;
+}
+
+function validPrivateKeyBundle(bundle, expectedPublicKey) {
+  // The browser wraps a 2,400-byte ML-KEM-768 private key with AES-GCM (16-byte tag).
+  return Boolean(bundle && typeof bundle === 'object'
+    && bundle.version === 2
+    && bundle.kdf === 'PBKDF2-HMAC-SHA-256'
+    && bundle.iterations === 600_000
+    && bundle.publicKey === expectedPublicKey
+    && isCanonicalBase64(bundle.publicKey, 1184)
+    && isCanonicalBase64(bundle.salt, 16)
+    && isCanonicalBase64(bundle.iv, 12)
+    && isCanonicalBase64(bundle.encryptedPrivateKey, 2416));
 }
 
 function passwordRecord(password) {
@@ -180,7 +216,7 @@ function clearLoginFailures(req) {
 app.get('/api/health', (_req, res) => res.json({ ok: true, crypto: 'ML-KEM-768 + HKDF-SHA-256 + AES-256-GCM' }));
 
 app.post('/api/register', (req, res) => {
-  const { username: rawUsername, password, kemPublicKey } = req.body ?? {};
+  const { username: rawUsername, password, kemPublicKey, privateKeyBundle } = req.body ?? {};
   if (!validUsername(rawUsername)) {
     return res.status(400).json({ error: 'Username must be 3–24 characters: letters, numbers, _ or -.' });
   }
@@ -191,10 +227,16 @@ app.post('/api/register', (req, res) => {
   if (!isCanonicalBase64(kemPublicKey, 1184)) {
     return res.status(400).json({ error: 'Invalid ML-KEM-768 public key.' });
   }
+  if (!validPrivateKeyBundle(privateKeyBundle, kemPublicKey)) {
+    return res.status(400).json({ error: 'Invalid encrypted private-key bundle.' });
+  }
   const username = rawUsername.trim().toLowerCase();
   if (store.users[username]) return res.status(409).json({ error: 'That username is already registered.' });
 
-  store.users[username] = { ...passwordRecord(password), kemPublicKey, createdAt: new Date().toISOString() };
+  store.users[username] = {
+    ...passwordRecord(password), kemPublicKey, privateKeyBundle,
+    createdAt: new Date().toISOString(),
+  };
   try {
     saveStore();
   } catch {
@@ -202,6 +244,7 @@ app.post('/api/register', (req, res) => {
     return res.status(500).json({ error: 'Could not save the account data.' });
   }
   createSession(username, res);
+  broadcastUsersChanged();
   res.status(201).json({ username, kemPublicKey });
 });
 
@@ -221,7 +264,26 @@ app.post('/api/login', (req, res) => {
   }
   clearLoginFailures(req);
   createSession(username, res);
-  res.json({ username, kemPublicKey: user.kemPublicKey });
+  res.json({ username, kemPublicKey: user.kemPublicKey, privateKeyBundle: user.privateKeyBundle ?? null });
+});
+
+// Existing accounts are migrated once from their original browser. Never silently replace a set bundle.
+app.post('/api/me/key-bundle', requireUser, (req, res) => {
+  const user = store.users[req.username];
+  const bundle = req.body?.privateKeyBundle;
+  if (!validPrivateKeyBundle(bundle, user.kemPublicKey)) {
+    return res.status(400).json({ error: 'Invalid encrypted private-key bundle.' });
+  }
+  if (user.privateKeyBundle) {
+    // Another concurrent legacy-login may have completed the one-time migration first. Never overwrite it.
+    return res.json({ ok: true, alreadyExists: true });
+  }
+  user.privateKeyBundle = bundle;
+  try { saveStore(); } catch {
+    delete user.privateKeyBundle;
+    return res.status(500).json({ error: 'Could not save the encrypted private-key bundle.' });
+  }
+  res.status(201).json({ ok: true });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -234,7 +296,8 @@ app.post('/api/logout', (req, res) => {
       }
     }
   }
-  res.setHeader('Set-Cookie', 'qsc_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict');
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `qsc_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict${secure}`);
   res.json({ ok: true });
 });
 
@@ -283,6 +346,12 @@ function safeSend(socket, message) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
 
+function broadcastUsersChanged() {
+  for (const userSockets of socketsByUser.values()) {
+    for (const socket of userSockets) safeSend(socket, { type: 'users-changed' });
+  }
+}
+
 httpServer.on('upgrade', (req, socket, head) => {
   const path = new URL(req.url, 'http://localhost').pathname;
   const origin = req.headers.origin;
@@ -304,6 +373,7 @@ wss.on('connection', (socket) => {
   if (!socketsByUser.has(username)) socketsByUser.set(username, new Set());
   socketsByUser.get(username).add(socket);
   safeSend(socket, { type: 'ready', username });
+  broadcastUsersChanged();
 
   socket.on('message', (raw) => {
     let packet;
@@ -314,17 +384,28 @@ wss.on('connection', (socket) => {
 
     const recipient = typeof packet.to === 'string' ? packet.to.toLowerCase() : '';
     const envelopes = packet.envelopes;
+    const clientMessageId = packet.clientMessageId;
+    if (typeof clientMessageId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientMessageId)) {
+      return safeSend(socket, { type: 'error', error: 'Invalid client message ID.' });
+    }
     if (!recipient || recipient === username || !store.users[recipient]) {
-      return safeSend(socket, { type: 'error', error: 'Unknown recipient.' });
+      return safeSend(socket, { type: 'error', error: 'Unknown recipient.', clientMessageId });
     }
     if (!envelopes || typeof envelopes !== 'object'
       || Object.keys(envelopes).length !== 2
       || !validEnvelope(envelopes[username])
       || !validEnvelope(envelopes[recipient])) {
-      return safeSend(socket, { type: 'error', error: 'Invalid encrypted envelope. No message was saved.' });
+      return safeSend(socket, { type: 'error', error: 'Invalid encrypted envelope. No message was saved.', clientMessageId });
     }
 
     const envelopeFingerprint = fingerprintRecipientEnvelope(username, recipient, envelopes);
+    const priorRequest = store.messages.find((existing) => existing.sender === username && existing.clientMessageId === clientMessageId);
+    if (priorRequest) {
+      if (priorRequest.recipient === recipient && priorRequest.envelopeFingerprint === envelopeFingerprint) {
+        return safeSend(socket, { type: 'sent', message: priorRequest, clientMessageId });
+      }
+      return safeSend(socket, { type: 'error', error: 'This client message ID was already used.', clientMessageId });
+    }
     const duplicateEnvelope = store.messages.some((existing) => {
       if (existing.sender !== username || existing.recipient !== recipient) return false;
       const fingerprint = existing.envelopeFingerprint
@@ -332,11 +413,12 @@ wss.on('connection', (socket) => {
       return fingerprint === envelopeFingerprint;
     });
     if (duplicateEnvelope) {
-      return safeSend(socket, { type: 'error', error: 'Duplicate encrypted envelope rejected.' });
+      return safeSend(socket, { type: 'error', error: 'Duplicate encrypted envelope rejected.', clientMessageId });
     }
 
     const message = {
       id: randomUUID(),
+      clientMessageId,
       sender: username,
       recipient,
       envelopeFingerprint,
@@ -347,10 +429,10 @@ wss.on('connection', (socket) => {
     if (store.messages.length > 10_000) store.messages.splice(0, store.messages.length - 10_000);
     try { saveStore(); } catch (error) {
       store.messages = store.messages.filter((m) => m.id !== message.id);
-      return safeSend(socket, { type: 'error', error: 'Could not persist the encrypted message.' });
+      return safeSend(socket, { type: 'error', error: 'Could not persist the encrypted message.', clientMessageId });
     }
 
-    safeSend(socket, { type: 'sent', message });
+    safeSend(socket, { type: 'sent', message, clientMessageId });
     for (const peer of socketsByUser.get(recipient) ?? []) {
       safeSend(peer, { type: 'message', message });
     }
@@ -360,6 +442,7 @@ wss.on('connection', (socket) => {
     const userSockets = socketsByUser.get(username);
     userSockets?.delete(socket);
     if (userSockets?.size === 0) socketsByUser.delete(username);
+    broadcastUsersChanged();
   });
 });
 

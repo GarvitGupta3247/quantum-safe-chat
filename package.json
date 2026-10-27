@@ -1,6 +1,6 @@
 {
   "name": "quantumsafe-chat-poc",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Minimal experimental post-quantum messaging prototype with a warm UI.",

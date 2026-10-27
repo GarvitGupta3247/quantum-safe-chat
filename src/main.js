@@ -5,6 +5,9 @@ const root = document.querySelector('#app');
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const KDF_INFO = encoder.encode('QuantumSafeChat PoC v1 | ML-KEM-768 | AES-256-GCM');
+const PRIVATE_KEY_STORAGE_VERSION = 2;
+// PBKDF2-HMAC-SHA-256 work factor used to wrap the local private key with the user's password.
+const PRIVATE_KEY_PBKDF2_ITERATIONS = 600_000;
 
 const state = {
   kem: null,
@@ -13,7 +16,13 @@ const state = {
   users: [],
   active: null,
   messages: [],
+  conversations: new Map(),
+  drafts: {},
   socket: null,
+  reconnectTimer: null,
+  reconnectAttempts: 0,
+  conversationLoadId: 0,
+  pendingSends: new Map(),
   unread: {},
   status: 'Connecting…',
   draft: '',
@@ -57,17 +66,93 @@ function localKeyName(username) {
   return `qsc:mlkem768:${username}`;
 }
 
-function readLocalKeys(username) {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(localKeyName(username)) || 'null');
-    if (parsed && typeof parsed.publicKey === 'string' && typeof parsed.privateKey === 'string') return parsed;
-  } catch { /* Ignore malformed local storage. */ }
-  return null;
+async function derivePrivateKeyWrappingKey(password, saltBytes) {
+  const passwordMaterial = await crypto.subtle.importKey(
+    'raw', encoder.encode(password), 'PBKDF2', false, ['deriveKey'],
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: saltBytes, iterations: PRIVATE_KEY_PBKDF2_ITERATIONS, hash: 'SHA-256' },
+    passwordMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
 }
 
-function storeLocalKeys(username, keys) {
-  // Demo shortcut only: this stores the private key unencrypted in localStorage.
-  localStorage.setItem(localKeyName(username), JSON.stringify(keys));
+async function createPrivateKeyBundle(keys, password) {
+  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+  const ivBytes = crypto.getRandomValues(new Uint8Array(12));
+  const wrappingKey = await derivePrivateKeyWrappingKey(password, saltBytes);
+  const encryptedPrivateKey = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: ivBytes },
+    wrappingKey,
+    base64ToBytes(keys.privateKey),
+  );
+  return {
+    version: PRIVATE_KEY_STORAGE_VERSION,
+    publicKey: keys.publicKey,
+    kdf: 'PBKDF2-HMAC-SHA-256',
+    iterations: PRIVATE_KEY_PBKDF2_ITERATIONS,
+    salt: bytesToBase64(saltBytes),
+    iv: bytesToBase64(ivBytes),
+    encryptedPrivateKey: bytesToBase64(new Uint8Array(encryptedPrivateKey)),
+  };
+}
+
+function readLocalKeyBundle(username) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(localKeyName(username)) || 'null');
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeLocalKeyBundle(username, bundle) {
+  localStorage.setItem(localKeyName(username), JSON.stringify(bundle));
+}
+
+async function unlockPrivateKeyBundle(bundle, password) {
+  if (!bundle || bundle.version !== PRIVATE_KEY_STORAGE_VERSION
+    || bundle.kdf !== 'PBKDF2-HMAC-SHA-256'
+    || bundle.iterations !== PRIVATE_KEY_PBKDF2_ITERATIONS
+    || typeof bundle.publicKey !== 'string'
+    || typeof bundle.salt !== 'string' || typeof bundle.iv !== 'string'
+    || typeof bundle.encryptedPrivateKey !== 'string') {
+    throw new Error('The encrypted private-key bundle is invalid or unsupported.');
+  }
+
+  try {
+    const saltBytes = base64ToBytes(bundle.salt);
+    const ivBytes = base64ToBytes(bundle.iv);
+    if (saltBytes.length !== 16 || ivBytes.length !== 12) throw new Error('Invalid key metadata.');
+    const wrappingKey = await derivePrivateKeyWrappingKey(password, saltBytes);
+    const privateKeyBytes = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: ivBytes },
+      wrappingKey,
+      base64ToBytes(bundle.encryptedPrivateKey),
+    );
+    return {
+      publicKey: bundle.publicKey,
+      privateKey: bytesToBase64(new Uint8Array(privateKeyBytes)),
+      storageVersion: PRIVATE_KEY_STORAGE_VERSION,
+    };
+  } catch {
+    throw new Error('Could not unlock the encrypted private key. Check your password or key bundle.');
+  }
+}
+
+async function readLocalKeys(username, password) {
+  const parsed = readLocalKeyBundle(username);
+  if (!parsed || typeof parsed.publicKey !== 'string') return null;
+
+  // Backward compatibility: old versions saved the private key as plain Base64 in localStorage.
+  if (typeof parsed.privateKey === 'string') {
+    return { publicKey: parsed.publicKey, privateKey: parsed.privateKey, storageVersion: 1 };
+  }
+
+  if (parsed.version === PRIVATE_KEY_STORAGE_VERSION) return unlockPrivateKeyBundle(parsed, password);
+  return null;
 }
 
 function localKeyMatches(serverPublicKey, keys) {
@@ -93,7 +178,7 @@ function showAuth(errorMessage = '', usernameValue = '') {
           <input id="password" name="password" type="password" autocomplete="current-password" minlength="8" maxlength="200" placeholder="At least 8 characters" required />
           <button id="authSubmit" class="primary-button" type="submit">Log in <span>→</span></button>
         </form>
-        <p class="auth-footnote">Demo accounts only. Your ML-KEM private key is kept in this browser's local storage. Do not use sensitive messages.</p>
+        <p class="auth-footnote">Demo accounts only. Your ML-KEM private key is encrypted with your password before local storage or server sync. The server stores only the encrypted key bundle. If you lose the password or the bundle, key recovery is not available.</p>
       </section>
       <p class="page-caption">NOT FOR REAL OR SENSITIVE MESSAGES</p>
     </main>`;
@@ -120,23 +205,41 @@ function showAuth(errorMessage = '', usernameValue = '') {
       let profile;
       let keys;
       if (mode === 'register') {
-        // ML-KEM keypair is generated in the browser; only its public key is sent to the server.
+        // Generate the ML-KEM keypair locally and password-encrypt the private key before upload.
         const [publicKeyBytes, privateKeyBytes] = state.kem.generateKeyPair();
         keys = { publicKey: bytesToBase64(publicKeyBytes), privateKey: bytesToBase64(privateKeyBytes) };
+        const privateKeyBundle = await createPrivateKeyBundle(keys, password);
         profile = await api('/api/register', {
           method: 'POST',
-          body: JSON.stringify({ username, password, kemPublicKey: keys.publicKey }),
+          body: JSON.stringify({ username, password, kemPublicKey: keys.publicKey, privateKeyBundle }),
         });
-        storeLocalKeys(profile.username, keys);
+        storeLocalKeyBundle(profile.username, privateKeyBundle);
       } else {
         profile = await api('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) });
-        keys = readLocalKeys(profile.username);
-        if (!localKeyMatches(profile.kemPublicKey, keys)) {
-          await api('/api/logout', { method: 'POST' }).catch(() => {});
-          throw new Error('This browser does not have the matching ML-KEM private key. Log in on the browser where you created the account; key recovery is not implemented.');
+        if (profile.privateKeyBundle) {
+          // Cross-browser login: fetch the password-encrypted key bundle and unlock it locally.
+          keys = await unlockPrivateKeyBundle(profile.privateKeyBundle, password);
+          if (!localKeyMatches(profile.kemPublicKey, keys)) {
+            await api('/api/logout', { method: 'POST' }).catch(() => {});
+            throw new Error('The stored private key does not match this account public key.');
+          }
+          storeLocalKeyBundle(profile.username, profile.privateKeyBundle);
+        } else {
+          // Legacy account: migrate the key from its original browser into a password-encrypted server bundle.
+          keys = await readLocalKeys(profile.username, password);
+          if (!localKeyMatches(profile.kemPublicKey, keys)) {
+            await api('/api/logout', { method: 'POST' }).catch(() => {});
+            throw new Error('This account has not synced its private key yet. Log in once on the original browser to migrate it, then you can use other devices.');
+          }
+          const privateKeyBundle = await createPrivateKeyBundle(keys, password);
+          storeLocalKeyBundle(profile.username, privateKeyBundle);
+          await api('/api/me/key-bundle', {
+            method: 'POST',
+            body: JSON.stringify({ privateKeyBundle }),
+          });
         }
       }
-      await enterChat(profile, keys);
+      await enterChat(profile, { publicKey: keys.publicKey, privateKey: keys.privateKey });
     } catch (error) {
       showAuth(error.message || 'Something went wrong.', username);
     }
@@ -144,9 +247,16 @@ function showAuth(errorMessage = '', usernameValue = '') {
 }
 
 async function enterChat(profile, keys) {
+  if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
+  state.reconnectAttempts = 0;
   state.me = profile.username;
   state.keys = { ...keys, privateKeyBytes: base64ToBytes(keys.privateKey), publicKeyBytes: base64ToBytes(keys.publicKey) };
   state.messages = [];
+  state.conversations = new Map();
+  state.drafts = {};
+  state.pendingSends = new Map();
+  state.conversationLoadId = 0;
   state.unread = {};
   state.draft = '';
   state.status = 'Loading contacts…';
@@ -158,33 +268,65 @@ async function enterChat(profile, keys) {
   if (state.active) await loadConversation(state.active);
 }
 
+function scheduleReconnect() {
+  if (!state.me || state.reconnectTimer) return;
+  const delay = Math.min(1000 * (2 ** state.reconnectAttempts), 15000);
+  state.reconnectAttempts += 1;
+  state.status = `Disconnected — reconnecting in ${Math.ceil(delay / 1000)}s`;
+  renderChat();
+  state.reconnectTimer = setTimeout(() => {
+    state.reconnectTimer = null;
+    if (state.me) connectSocket();
+  }, delay);
+}
+
 function connectSocket() {
-  if (state.socket) state.socket.close();
+  if (!state.me) return;
+  if (state.socket) {
+    const previous = state.socket;
+    state.socket = null;
+    previous.close();
+  }
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const socket = new WebSocket(`${scheme}//${location.host}/ws`);
   state.socket = socket;
   socket.addEventListener('open', () => {
+    if (state.socket !== socket || !state.me) return;
+    state.reconnectAttempts = 0;
     state.status = 'Connected';
     renderChat();
+    refreshUsers().catch(() => {});
+    // Re-send unacknowledged packets with the same id; the server treats them idempotently.
+    for (const pending of state.pendingSends.values()) {
+      try { socket.send(JSON.stringify(pending.packet)); } catch { /* close handler will retry */ }
+    }
   });
   socket.addEventListener('close', () => {
-    state.status = 'Disconnected — refresh to reconnect';
-    if (state.me) renderChat();
+    if (state.socket !== socket) return;
+    state.socket = null;
+    if (state.me) scheduleReconnect();
   });
   socket.addEventListener('error', () => {
-    state.status = 'Connection error';
+    if (state.socket === socket) state.status = 'Connection error — reconnecting…';
   });
   socket.addEventListener('message', async (event) => {
+    if (state.socket !== socket) return;
     let packet;
     try { packet = JSON.parse(event.data); } catch { return; }
     if (packet.type === 'ready') {
       state.status = 'Connected';
       refreshUsers().catch(() => {});
       renderChat();
+    } else if (packet.type === 'users-changed') {
+      refreshUsers().catch(() => {});
     } else if (packet.type === 'error') {
+      if (packet.clientMessageId) state.pendingSends.delete(packet.clientMessageId);
       state.status = packet.error || 'Message error';
       renderChat();
-    } else if (packet.type === 'sent' || packet.type === 'message') {
+    } else if (packet.type === 'sent') {
+      await handleWireMessage(packet.message);
+      handleSentAcknowledgement(packet.clientMessageId, packet.message);
+    } else if (packet.type === 'message') {
       await handleWireMessage(packet.message);
     }
   });
@@ -192,6 +334,7 @@ function connectSocket() {
 
 async function refreshUsers() {
   const result = await api('/api/users');
+  if (!state.me) return;
   state.users = result.users;
   renderChat();
 }
@@ -239,33 +382,62 @@ async function decryptEnvelope(envelope) {
   }
 }
 
+function cacheConversationMessage(username, message) {
+  const existing = state.conversations.get(username) ?? [];
+  const index = existing.findIndex((item) => item.id === message.id);
+  if (index >= 0) {
+    // Prefer a successfully decrypted version over an earlier transient decrypt error.
+    if (existing[index].decryptError && !message.decryptError) existing[index] = message;
+  } else {
+    existing.push(message);
+  }
+  existing.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  state.conversations.set(username, existing);
+  if (state.active === username) state.messages = existing;
+}
+
 async function handleWireMessage(message) {
   if (!message || !message.id || !state.me) return;
   const other = message.sender === state.me ? message.recipient : message.sender;
+  let decoded;
+  try {
+    const text = await decryptEnvelope(message.envelopes?.[state.me]);
+    decoded = { ...message, text, decryptError: false };
+  } catch {
+    decoded = { ...message, text: 'Could not decrypt this message. The local key may not match.', decryptError: true };
+  }
+  // Cache by conversation, even if the user switched chats while decryption was running.
+  cacheConversationMessage(other, decoded);
   if (other !== state.active) {
     if (message.sender !== state.me) state.unread[other] = (state.unread[other] || 0) + 1;
     renderChat();
     return;
   }
-  try {
-    const text = await decryptEnvelope(message.envelopes?.[state.me]);
-    appendMessage({ ...message, text, decryptError: false });
-  } catch {
-    appendMessage({ ...message, text: 'Could not decrypt this message. The local key may not match.', decryptError: true });
-  }
-}
-
-function appendMessage(message) {
-  if (state.messages.some((existing) => existing.id === message.id)) return;
-  state.messages.push(message);
-  state.messages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  state.unread[other] = 0;
+  state.messages = state.conversations.get(other) ?? [];
   renderMessages();
 }
 
+function handleSentAcknowledgement(clientMessageId, message) {
+  const pending = state.pendingSends.get(clientMessageId);
+  if (!pending) return;
+  state.pendingSends.delete(clientMessageId);
+  const savedDraft = state.drafts[pending.recipient] ?? '';
+  if (savedDraft === pending.draftSnapshot) state.drafts[pending.recipient] = '';
+  if (state.active === pending.recipient && state.draft === pending.draftSnapshot) {
+    state.draft = '';
+  }
+  state.status = 'Message saved and relayed';
+  renderChat();
+}
+
 async function loadConversation(username) {
+  if (state.active) state.drafts[state.active] = state.draft;
   state.active = username;
   state.unread[username] = 0;
-  state.messages = [];
+  state.draft = state.drafts[username] ?? '';
+  state.messages = state.conversations.get(username) ?? [];
+  const loadId = ++state.conversationLoadId;
   renderChat();
   if (!username) return;
   try {
@@ -279,48 +451,73 @@ async function loadConversation(username) {
         fetchedMessages.push({ ...message, text: 'Could not decrypt this message. The local key may not match.', decryptError: true });
       }
     }
-    // Keep live messages that arrived while history was loading, and de-duplicate by message id.
-    const merged = new Map([...fetchedMessages, ...state.messages].map((message) => [message.id, message]));
-    state.messages = [...merged.values()].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-    renderChat();
+    // Merge history with messages delivered live during the request, deduplicating by server message ID.
+    const liveMessages = state.conversations.get(username) ?? [];
+    const merged = new Map(fetchedMessages.map((message) => [message.id, message]));
+    for (const message of liveMessages) {
+      const previous = merged.get(message.id);
+      if (!previous || (previous.decryptError && !message.decryptError)) merged.set(message.id, message);
+    }
+    const ordered = [...merged.values()].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    state.conversations.set(username, ordered);
+    if (state.active === username && state.conversationLoadId === loadId) {
+      state.messages = ordered;
+      renderChat();
+    }
   } catch (error) {
-    state.status = error.message;
-    renderChat();
+    if (state.active === username && state.conversationLoadId === loadId) {
+      state.status = error.message;
+      renderChat();
+    }
   }
 }
 
 async function sendMessage() {
-  const text = state.draft.trim();
-  if (!text || !state.active || !state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+  const draftSnapshot = state.draft;
+  const text = draftSnapshot.trim();
+  const recipientName = state.active;
+  if (!text || !recipientName) return;
   if (text.length > 2000) {
     state.status = 'Messages are limited to 2,000 characters.';
     renderChat();
     return;
   }
-  const recipient = state.users.find((user) => user.username === state.active);
+  const recipient = state.users.find((user) => user.username === recipientName);
   if (!recipient) return;
+  if ([...state.pendingSends.values()].some((pending) => pending.recipient === recipientName && pending.draftSnapshot === draftSnapshot)) return;
   const button = root.querySelector('#sendButton');
   if (button) button.disabled = true;
   state.status = 'Encrypting in browser…';
   try {
-    // Fresh ML-KEM encapsulation and fresh AES-GCM key for each copy of each message.
-    // One encrypted envelope is for the recipient; a second lets the sender read its history.
+    // Fresh ML-KEM encapsulation and a fresh AES-GCM key for each recipient/sender copy.
     const [recipientEnvelope, senderEnvelope] = await Promise.all([
       encryptEnvelope(recipient.kemPublicKey, text),
       encryptEnvelope(state.keys.publicKey, text),
     ]);
+    const clientMessageId = crypto.randomUUID();
     const packet = {
       type: 'send',
+      clientMessageId,
       to: recipient.username,
       envelopes: { [recipient.username]: recipientEnvelope, [state.me]: senderEnvelope },
     };
-    state.socket.send(JSON.stringify(packet));
-    state.draft = '';
-    state.status = 'Encrypted message sent';
+    state.pendingSends.set(clientMessageId, {
+      text, recipient: recipient.username, draftSnapshot, packet,
+    });
+    state.status = 'Waiting for server confirmation…';
+    if (state.socket?.readyState === WebSocket.OPEN) {
+      state.socket.send(JSON.stringify(packet));
+    } else {
+      scheduleReconnect();
+    }
+    // Keep the draft until the server confirms persistence; an acknowledgement clears only the exact sent draft.
     renderChat();
   } catch (error) {
     state.status = `Could not encrypt/send: ${error.message}`;
     renderChat();
+  } finally {
+    const currentButton = root.querySelector('#sendButton');
+    if (currentButton) currentButton.disabled = false;
   }
 }
 
@@ -383,6 +580,10 @@ function renderChatWorkspace() {
 
 function renderChat() {
   if (!state.me) return;
+  const previousTextarea = root.querySelector('#messageInput');
+  const restoreComposerFocus = Boolean(previousTextarea && document.activeElement === previousTextarea);
+  const selectionStart = previousTextarea?.selectionStart ?? state.draft.length;
+  const selectionEnd = previousTextarea?.selectionEnd ?? state.draft.length;
   const statusClass = state.status === 'Connected' ? 'good' : 'neutral';
   root.innerHTML = `
     <div class="app-shell">
@@ -395,22 +596,36 @@ function renderChat() {
     </div>`;
 
   root.querySelector('#logoutButton').addEventListener('click', async () => {
+    if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+    state.me = null; // Prevent the close handler from scheduling another connection.
     try { await api('/api/logout', { method: 'POST' }); } catch { /* sign out locally anyway */ }
-    state.socket?.close();
-    state.me = null; state.keys = null; state.users = []; state.active = null; state.messages = [];
+    const oldSocket = state.socket;
+    state.socket = null;
+    oldSocket?.close();
+    state.keys = null; state.users = []; state.active = null; state.messages = [];
+    state.conversations = new Map(); state.drafts = {}; state.pendingSends = new Map();
     showAuth();
   });
   root.querySelectorAll('[data-user]').forEach((button) => button.addEventListener('click', () => {
-    state.draft = '';
     loadConversation(button.dataset.user);
   }));
   const textarea = root.querySelector('#messageInput');
   if (textarea) textarea.value = state.draft;
   textarea?.addEventListener('input', () => {
     state.draft = textarea.value;
+    if (state.active) state.drafts[state.active] = state.draft;
     const count = root.querySelector('.char-count');
     if (count) count.textContent = `${state.draft.length}/2000`;
   });
+  if (restoreComposerFocus && textarea && !textarea.disabled) {
+    textarea.focus({ preventScroll: true });
+    try {
+      const start = Math.min(selectionStart, textarea.value.length);
+      const end = Math.min(selectionEnd, textarea.value.length);
+      textarea.setSelectionRange(start, end);
+    } catch { /* Some browsers do not expose selection on a disabled/non-text input. */ }
+  }
   textarea?.addEventListener('keydown', (event) => {
     // Enter sends; Shift+Enter inserts a newline. Ignore Enter while an IME composition is active.
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -433,15 +648,12 @@ async function start() {
     return;
   }
 
+  // The key is password-wrapped at rest, so a returning user must re-enter the password to unlock it.
   try {
     const profile = await api('/api/me');
-    const keys = readLocalKeys(profile.username);
-    if (localKeyMatches(profile.kemPublicKey, keys)) {
-      await enterChat(profile, keys);
-      return;
-    }
-    await api('/api/logout', { method: 'POST' }).catch(() => {});
-  } catch { /* Not logged in yet. */ }
+    showAuth('Enter your password to unlock your encrypted private key.', profile.username);
+    return;
+  } catch { /* No active server session. */ }
   showAuth();
 }
 
