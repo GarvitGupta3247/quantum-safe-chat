@@ -53,6 +53,13 @@ npm run build && npm run test:browser   # 9-step end-to-end test in a real headl
 real `ChatClient` instances over HTTP and WebSocket, and models a malicious server by editing its
 database and message queue. See [TEST_PLAN.md](TEST_PLAN.md) for what each test covers.
 
+## Deploying for free (Render)
+The repository includes a `render.yaml` Blueprint. On https://render.com: sign in with GitHub →
+**New → Blueprint** → choose this repository → **Apply**. The public `https://…onrender.com` URL is
+allowed automatically (`RENDER_EXTERNAL_URL`). On the free plan the service sleeps after ~15 minutes
+idle (the next visit takes about a minute) and **all accounts and messages are erased** whenever it
+sleeps or redeploys, because free instances have no persistent disk.
+
 ## Upgrading from v0.5
 Existing accounts must be upgraded once via **Upgrade legacy account** on the login page. See
 [UPGRADE.md](UPGRADE.md).

@@ -80,7 +80,11 @@ export function migrateStoreObject(parsed) {
 export async function createServer({
   dataDir = resolve(process.env.DATA_DIR || 'data'),
   opaqueServerSetup = process.env.OPAQUE_SERVER_SETUP,
-  allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000').split(','),
+  allowedOrigins = [
+    ...(process.env.ALLOWED_ORIGINS || 'http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000').split(','),
+    // Render sets this to the service's public https:// URL automatically.
+    ...(process.env.RENDER_EXTERNAL_URL ? [process.env.RENDER_EXTERNAL_URL] : []),
+  ],
   legacyMigration = process.env.QSC_LEGACY_MIGRATION !== '0',
   production = process.env.NODE_ENV === 'production',
   distDir = null,

@@ -15,7 +15,7 @@ v0.6 server and vice versa.
 4. Tell users to upgrade (below). When everyone has, set `QSC_LEGACY_MIGRATION=0` and restart;
    that closes the only endpoint that still accepts a password.
 
-Render settings are unchanged apart from the new variables: build `npm ci && npm run build`, start
+Render settings are unchanged apart from the new variables: build `npm ci --include=dev && npm run build`, start
 `npm start`, `NODE_ENV=production`, `ALLOWED_ORIGINS=https://YOUR-SERVICE.onrender.com`, optional
 persistent disk with `DATA_DIR=/var/data`.
 

@@ -1,0 +1,17 @@
+# Render Blueprint: New -> Blueprint -> select this repository -> Apply.
+# Free instances have no persistent disk: all accounts and messages are erased whenever the service
+# sleeps (after ~15 minutes without traffic) or redeploys. Use a paid instance with a disk
+# (DATA_DIR=/var/data) and a fixed OPAQUE_SERVER_SETUP secret for anything longer-lived.
+services:
+  - type: web
+    name: quantum-safe-chat
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
