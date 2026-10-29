@@ -435,6 +435,11 @@ export async function createServer({
     res.json({ ok: true, vaultVersion: user.vault.version });
   });
 
+  // Lets a reloaded page pre-fill the username; reveals nothing beyond the caller's own cookie.
+  app.get('/api/session', (req, res) => {
+    res.json({ username: sessionFor(req)?.username ?? null });
+  });
+
   app.get('/api/me', requireUser, (req, res) => {
     const user = store.users[req.username];
     res.json({
@@ -638,6 +643,7 @@ export async function createServer({
   });
 
   if (distDir && existsSync(distDir)) {
+    distDir = resolve(distDir); // sendFile requires an absolute path
     app.use(express.static(distDir, { index: false }));
     app.use((req, res, next) => {
       if (req.method === 'GET' && !req.path.startsWith('/api') && req.path !== '/ws') return res.sendFile(join(distDir, 'index.html'));

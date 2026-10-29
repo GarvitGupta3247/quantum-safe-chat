@@ -131,3 +131,30 @@ test('an unauthorized third user cannot read or receive another pair\'s messages
     await env.close();
   }
 });
+
+test('N1/N2: trace events emitted by the real client contain no keys, secrets or plaintext', async () => {
+  const env = await startServer();
+  try {
+    const events = [];
+    const { alice, bob } = await setupUsers(env.base);
+    alice.on('trace', (event) => events.push(event));
+    bob.on('trace', (event) => events.push(event));
+    await deliver(alice, bob, 'TRACE-CANARY one');
+    await deliver(bob, alice, 'TRACE-CANARY two');
+    const text = JSON.stringify(events);
+    assert.ok(events.length >= 4);
+    assert.ok(!text.includes('TRACE-CANARY'));
+    for (const snapshot of [alice.snapshotForTesting(), bob.snapshotForTesting()]) {
+      const secrets = [
+        ...Object.values(snapshot.identity.private),
+        ...snapshot.prekeys.spk.map((k) => k.priv),
+        ...Object.values(snapshot.sessions).flatMap((s) => Object.values(s.list)).flatMap((s) => [s.ratchet.rk, s.ratchet.cks, s.ratchet.ckr, s.ratchet.dhs.priv]),
+      ].filter(Boolean);
+      for (const secret of secrets) assert.ok(!text.includes(secret));
+    }
+    // N2: no event claims success for a step whose outcome is only known after AEAD authentication.
+    assert.ok(!events.some((event) => /decapsulation/i.test(event.title) && event.outcome === 'success'));
+  } finally {
+    await env.close();
+  }
+});

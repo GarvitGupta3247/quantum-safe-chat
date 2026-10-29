@@ -13,6 +13,10 @@ const https = lanHttps
   : undefined;
 
 export default defineConfig({
+  build: {
+    // Never inline assets as data: URIs; the production CSP only allows same-origin fonts/scripts.
+    assetsInlineLimit: 0,
+  },
   server: {
     host: '0.0.0.0',
     https,
