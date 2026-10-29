@@ -1,9 +1,9 @@
 {
   "name": "quantumsafe-chat-poc",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
-  "description": "Experimental post-quantum messaging prototype with live cryptographic tracing, benchmarks, and security tests.",
+  "description": "Post-quantum end-to-end encrypted messaging research prototype: OPAQUE login, PQXDH (X25519 + ML-KEM-768), Double Ratchet, hybrid Ed25519 + ML-DSA-65 identities.",
   "scripts": {
     "dev": "concurrently -k \"npm:server:dev\" \"npm:web:dev\"",
     "server:dev": "node --watch server/index.js",
@@ -11,15 +11,22 @@
     "build": "vite build",
     "start": "node server/index.js",
     "web:lan": "vite --host 0.0.0.0",
-    "dev:lan": "concurrently -k \"npm:server:dev\" \"npm:web:lan\""
+    "dev:lan": "concurrently -k \"npm:server:dev\" \"npm:web:lan\"",
+    "test": "node --test --test-concurrency=4 --test-timeout=180000 test/unit/ test/integration/",
+    "test:unit": "node --test test/unit/",
+    "test:browser": "node test/browser/e2e.mjs"
   },
   "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@noble/post-quantum": "0.7.1",
+    "@serenity-kit/opaque": "1.1.0",
     "express": "^5.1.0",
-    "mlkem": "^2.7.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
+    "mlkem": "2.7.0",
     "vite": "^6.3.5"
   },
   "engines": {
