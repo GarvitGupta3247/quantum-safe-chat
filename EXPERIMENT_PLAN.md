@@ -1,128 +1,66 @@
-# Experiment Plan — QuantumSafe Chat
+# Experiment Plan — QuantumSafe Chat v0.5.0
 
 ## 1. Research question
 
-**How do selected post-quantum key-establishment operations compare with a classical baseline in execution time and communication overhead in this browser-based prototype, and what protocol-level failure cases remain despite authenticated encryption?**
+How do the selected ML-KEM-768 and classical X25519 key-establishment paths compare in browser API wall-clock time and key-establishment message size, and what do simple negative tests demonstrate about authenticated encryption and key handling?
 
-This experiment evaluates this implementation and environment. It does not establish universal performance characteristics or prove that the full application is secure.
+This experiment characterizes one implementation and test environment only. It does not establish universal performance, security certification or a full protocol proof.
 
-## 2. Research objectives
+## 2. Systems under comparison
 
-1. Measure ML-KEM-768 key generation, encapsulation, decapsulation, and a clearly defined combined exchange.
-2. Measure the available classical X25519 baseline using a clearly stated operation scope.
-3. Measure HKDF-SHA-256 and AES-256-GCM for a fixed, documented payload size (the current demo uses a 1 KiB test payload for these operations).
-4. Record public-key/ciphertext/envelope sizes where possible.
-5. Verify expected rejection of tampered AES-GCM data and mismatched-key decryption.
-6. Preserve raw results and enough environment information for another person to reproduce the run.
+### Post-quantum path
 
-## 3. Hypotheses
+- ML-KEM-768 key-pair generation (measured separately).
+- Per-sample ML-KEM encapsulation to one benchmark recipient public key.
+- Recipient decapsulation with its paired private key.
+- Shared-secret equality checked locally; no secret is saved to results.
 
-- **H1:** ML-KEM-768 and X25519 will have different latency and data-size profiles in the selected implementation and browser.
-- **H2:** AES-GCM authentication will reject modified ciphertext/tag data.
-- **H3:** Correct primitive behavior does not by itself provide identity authentication, replay protection, or forward secrecy at the application-protocol level.
+### Classical baseline
 
-These are hypotheses to test, not assumed results. Do not write conclusions before collecting data.
+- X25519 using Web Crypto API if supported by the browser.
+- One recipient key pair is generated for the run; each sample creates a fresh ephemeral key pair.
+- The ephemeral public key is exported and ECDH `deriveBits` is measured at both modeled peers.
+- Shared-secret equality is verified and secret bytes are discarded from the result row.
 
-## 4. Environment to record
+### Symmetric path
 
-For every published run, record:
+Both paths use HKDF-SHA-256 and AES-256-GCM with a fixed 1 KiB payload. HKDF `info` is domain-separated by protocol (`ML-KEM-768` or `X25519`). Encryption/decryption timings are recorded separately from key establishment.
 
-- Date/time and operating system.
-- CPU/device model if known; power/performance mode if relevant.
-- Browser name and version.
-- Node.js and npm versions for server/build tests.
-- Repository commit or source revision.
-- Dependency versions (`npm ls --depth=0` output is useful).
-- Browser crypto support and whether the X25519 baseline was available.
-- Benchmark iteration count, warm-up count, payload size, and any configuration flags.
-- Whether the run was local, LAN, or deployed; network timing must not be mixed with local crypto timing without explicit labeling.
+## 3. Measurement definitions
 
-Do not include usernames, session cookies, keys, plaintext messages, or other personal data in experiment artifacts.
+- `ML-KEM exchange`: encapsulation + decapsulation.
+- `X25519 exchange`: ephemeral key generation + raw public-key export + `deriveBits` at sender and receiver.
+- `keygen`: ML-KEM key-pair generation per sample; for X25519, ephemeral pair generation per sample.
+- `wire key payload size`: raw KEM ciphertext length and Base64-encoded field length versus raw ephemeral X25519 public-key length and its Base64 representation. This is not total HTTPS/WebSocket packet size.
+- Timings use `performance.now()`. X25519 uses asynchronous Web Crypto; ML-KEM package calls are synchronous. Thus the results are browser API wall-clock latencies, not primitive-only timing in a normalized native harness.
+- Network latency is excluded.
 
-## 5. Benchmark methodology
+## 4. Sampling
 
-1. Start from a clean, documented repository revision and build.
-2. Run each operation's warm-up phase before collecting timed samples. Record the warm-up count.
-3. Use a documented fixed iteration count. The existing UI offers 100 iterations; use this for the first reproducible run unless it causes instability. Repeat the full run at least three times if time permits.
-4. Use a monotonic high-resolution timer available in the browser, and keep timing boundaries consistent.
-5. Report sample count, median, mean, standard deviation, and p95 when the sample count is sufficient. State the percentile calculation method.
-6. Report units consistently, preferably milliseconds for duration and bytes for sizes.
-7. Separate key generation, encapsulation/agreement, decapsulation/derivation, HKDF, AES-GCM encryption/decryption, and combined end-to-end operations.
-8. State exactly which work is included in each combined measurement. Do not compare ML-KEM encapsulation alone with a complete X25519 handshake and call it equivalent.
-9. Export raw samples when possible, plus a summary. Preserve the original CSV rather than only copying averages into a report.
-10. Repeat on the same device/browser before comparing algorithms. If comparing across devices, treat each environment as a separate group.
+- Default: 10 warm-up samples followed by 100 measured samples per supported operation; UI permits 20–500 measured samples.
+- Rerun the complete experiment at least three times when possible.
+- Report mean, median, p95 and population standard deviation, plus the full raw samples.
+- Do not remove slow samples without documenting a reason.
+- Report browser/platform and any unsupported algorithm explicitly.
 
-## 6. Comparison caveats
+## 5. Environment to record
 
-ML-KEM-768 is a key-encapsulation mechanism; X25519 is a Diffie–Hellman key-agreement mechanism. Their protocol flows and data structures differ. Any comparison must define comparable end goals, such as establishing a shared secret, and explain setup, key-generation, public-key exchange, encapsulation/ciphertext exchange, and derivation costs included in the measurement.
+- Date/time, OS and device/CPU if known.
+- Browser name/version and `navigator.userAgent`.
+- Node/npm versions and dependency versions for the deployed commit.
+- Git commit/source revision.
+- Sample count, warm-up count, payload size, supported cryptographic algorithms.
+- Local versus hosted environment; no-network timings versus separate measured network tests.
 
-Do not imply that a timing result alone measures security strength. Do not infer production-scale throughput from a local browser microbenchmark.
+## 6. Security experiments
 
-## 7. Data to collect
+1. Valid AES-GCM round trip: recovered bytes must match test payload.
+2. Flip a ciphertext byte: authenticated decryption should reject modified ciphertext/tag.
+3. Attempt to unlock an encrypted private-key bundle using an incorrect password: decryption should reject.
+4. Decapsulate with a mismatched ML-KEM private key and attempt AES-GCM decryption: authentication should reject.
 
-### Timing data
-- Algorithm / operation name.
-- Sample number and duration.
-- Summary statistics: median, mean, standard deviation, and p95 where appropriate.
-- Warm-up and measured iteration counts.
-- Payload size and configuration.
+These tests use disposable sample material and do not constitute a penetration test. The UI does not currently automate a full end-to-end replay test.
 
-### Size data
-- Public-key bytes.
-- KEM ciphertext bytes or the corresponding classical public-key material.
-- Nonce/IV, authentication tag, and envelope overhead where available.
-- Total serialized bytes for a representative message envelope.
-- Message payload size, clearly separated from cryptographic overhead.
+## 7. Reporting
 
-### Security-test data
-- Test ID and description.
-- Input mutation / test condition, without exposing secrets.
-- Expected outcome.
-- Observed outcome.
-- PASS/FAIL and any safe error category.
-- Source revision and test date.
-
-## 8. Security experiment matrix
-
-| ID | Test condition | Expected outcome | Interpretation limit |
-|---|---|---|---|
-| SEC-01 | Flip a ciphertext or authentication-tag bit | AES-GCM decryption rejects | Demonstrates tamper detection for this test path only. |
-| SEC-02 | Attempt ML-KEM decapsulation with a mismatched private key | No accepted valid plaintext; operation fails safely | Does not prove all malformed KEM inputs are handled safely. |
-| SEC-03 | Remove required envelope fields or use invalid types/encoding | Server rejects request safely | Does not replace full fuzzing or code review. |
-| SEC-04 | Resend an identical valid envelope | Record actual duplicate behavior; if deduplication exists, verify it | No replay protection claim unless a defined mechanism is tested. |
-| SEC-05 | Inspect persisted message records and WebSocket payloads | No plaintext body or private key in normal message path | Metadata may remain visible. |
-| SEC-06 | Inspect activity logs and exported CSV | No password, token, private key, raw shared secret, or shared-secret fingerprint | Review all logging paths, not just the main screen. |
-| SEC-07 | Replace a recipient public key in a controlled test | Demonstrate whether the sender can detect it | Current design lacks automatic cryptographic identity authentication. |
-
-## 9. Reporting format
-
-For each result, include:
-
-- **Question:** what is being measured or tested?
-- **Method:** exact operation, sample count, warm-up, payload, environment.
-- **Result:** raw-data location and summary statistics.
-- **Interpretation:** what the evidence supports.
-- **Limitations:** what the experiment does not establish.
-
-Graphs are optional; raw CSV/JSON and a concise summary are more important than decorative charts.
-
-## 10. Reproducibility checklist
-
-- [ ] Repository revision recorded.
-- [ ] Setup and build commands recorded.
-- [ ] Browser, OS, device, and dependency versions recorded.
-- [ ] Warm-up and iteration counts recorded.
-- [ ] Payload size and timing boundaries documented.
-- [ ] Raw benchmark export saved.
-- [ ] Security-test outcomes saved.
-- [ ] No secrets or personal data included in exports.
-- [ ] Results reproduced in a second run.
-- [ ] Conclusions limited to the measured implementation and environment.
-
-## 11. Deliverables
-
-1. At least one raw benchmark export.
-2. A summary table with methodology and environment.
-3. A security-test matrix with expected and observed outcomes.
-4. A short discussion of performance/size trade-offs and remaining protocol limitations.
-5. Updated README links to the experiment and threat-model documents.
+Export the JSON research report and raw benchmark CSV. Preserve result files without editing measured numbers. Include methodology and limitations. Do not claim that a run proves the entire system secure or that its results generalize to other devices.

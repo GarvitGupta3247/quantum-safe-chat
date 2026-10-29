@@ -1,35 +1,50 @@
-# QuantumSafe Chat — Simple Demo Guide
+# Mentor Demo — QuantumSafe Chat v0.5.0
 
-## 60-second walkthrough
+## Before the demo
 
-1. Register a test account and point out that an ML-KEM-768 keypair is generated in the browser.
-2. Register a second account in a separate browser profile.
-3. Send a message in both directions.
-4. Explain the flow: ML-KEM encapsulates a shared secret for each message copy; HKDF-SHA-256 derives an AES key; AES-256-GCM encrypts/authenticates the message; the server relays encrypted envelopes.
-5. Test live contact updates by registering/logging in a third test account without refreshing the first browser. Test background delivery by sending a message while the recipient has another chat selected, then click the sender's chat; history and cached messages should appear without a page reload.
-6. Test cross-browser account access: after an existing account has logged in once on its original browser to migrate the key bundle, log in to that same account from a second browser with the same password. The server transfers only the password-encrypted private-key bundle; the browser unlocks it locally.
-7. Test reconnection by briefly taking the network offline and restoring it; the WebSocket should reconnect and retry an unacknowledged send using the same client message ID.
-8. If asked about security boundaries, explain that the ML-KEM private key is password-wrapped with PBKDF2-HMAC-SHA-256 and AES-256-GCM before local storage or upload. This helps protect a copied bundle when the attacker doesn't know the password, but cannot protect against malicious JavaScript or a compromised unlocked browser. Public keys are not authenticated, and a full forward-secrecy protocol remains future work. Duplicate envelope rejection and message-ID idempotency are limited replay/retry measures, not complete protocol replay protection.
+- Deploy the exact tested commit and write down the short Git commit.
+- Use two test accounts in two separate browser profiles.
+- Use non-sensitive test messages.
+- Open **Messages**, **Crypto Trace**, **Benchmark Lab** and **Security Tests** once so the navigation is familiar.
 
-## Useful source locations
+## Suggested 5–7 minute walkthrough
 
-- `src/main.js`: registration UI, browser key generation, KEM encapsulation/decapsulation, HKDF derivation, AES-GCM encrypt/decrypt, websocket client, send/receive message handling.
-- `server/index.js`: Express API, scrypt password hashes, in-memory sessions, login throttling, security headers/CSP, `no-store` API responses, encrypted private-key bundle storage/migration, presence notifications, message-ID idempotency, envelope validation, optional `DATA_DIR`, WebSocket relay and production static file serving.
-- `src/style.css`: Ember & Brass color palette and layout.
-- `package.json`: dependencies and run/build scripts.
-- `vite.config.js`: Vite development server and API/WebSocket proxies.
+### 1. Show the chat (about 1 minute)
 
-## Security questions to answer honestly
+- Log into the two test accounts.
+- Exchange a short message in both directions.
+- Explain that the plaintext is encrypted in the browser before the server receives the envelope.
 
-- ML-KEM-768 establishes a shared secret; it is not itself a bulk message-encryption algorithm.
-- HKDF turns the shared secret into a symmetric key; AES-GCM protects the message and authenticates its ciphertext.
-- The server is designed to relay encrypted message envelopes rather than plaintext bodies.
-- No public-key authentication means a malicious server could substitute a contact key.
-- Fresh encapsulation alone is not a full forward-secrecy protocol.
-- The JSON store remains application-readable (password hashes/salts, public keys, ciphertext, and readable metadata) and can lose data on ephemeral hosting unless `DATA_DIR` points to a mounted persistent volume. Sessions still live in memory and reset after a server restart.
-- Basic login throttling is in-memory, per app instance, and resets on restart.
+### 2. Show Crypto Trace (about 2 minutes)
 
-Use only test accounts and non-sensitive messages. This project has not been independently audited.
+- Show the public-key fingerprint and observed public-key byte count.
+- Show the encrypted private-key bundle: PBKDF2-HMAC-SHA-256 iteration count, salt/IV lengths, encrypted byte count and ciphertext preview. Explicitly say the raw private key is not shown.
+- Return to Messages and send a new message.
+- Reopen Crypto Trace and inspect the real KEM ciphertext, salt, IV and AES-GCM ciphertext from the captured envelope.
+- Point out the measured encapsulation, HKDF and AES-GCM timings, then describe that the server sees the encrypted envelope and metadata.
 
+### 3. Run Benchmark Lab (about 2 minutes)
 
-Composer tip: press **Enter** to send a message, or **Shift+Enter** to start a new line.
+- Run 100 samples after warm-up.
+- Explain operation scopes: ML-KEM encapsulation + decapsulation; X25519 ephemeral key generation + public-key export + ECDH derivation at both modeled peers.
+- Explain that the same HKDF implementation and same 1 KiB payload are used, with a domain-separated HKDF info string for each protocol.
+- Show median, p95, standard deviation and key-establishment data sizes.
+- Download the raw CSV and the JSON report. Do not claim the results generalize to every device.
+
+### 4. Run Security Tests (about 1 minute)
+
+- Show valid AES-GCM round trip.
+- Show actual tampered ciphertext rejection.
+- Show wrong-password rejection for an encrypted test key bundle.
+- Show mismatched ML-KEM private-key failure.
+- Explain these are focused negative tests, not a full system audit.
+
+## Claims to make accurately
+
+- Implemented: ML-KEM-768 key establishment, HKDF-SHA-256, AES-256-GCM, password-encrypted private-key bundle, runtime Crypto Trace, browser-local benchmark and focused security tests.
+- Not implemented: ML-DSA signatures/identity authentication, a reviewed forward-secrecy protocol, complete replay protection, and the planned database migration.
+- The current JSON data store is prototype-level; use a persistent Render volume if demo data must survive restarts.
+
+## Backup presentation evidence
+
+Keep a copy of: a screenshot of a real Crypto Trace after sending a test message; a benchmark CSV from your actual device; the JSON report; and the observed security-test results. Do not hand-edit numbers or present illustrative/synthetic values as measurements.

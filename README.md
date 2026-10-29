@@ -1,70 +1,91 @@
-# QuantumSafe Chat — Simple Phase 1 build
+# QuantumSafe Chat — Research Lab build (v0.5.0)
 
-A minimal one-to-one messaging prototype with a warm Ember & Brass interface. The UI focuses on chat only; the separate Crypto Activity, Benchmarks, and Attack Lab screens are removed from this variant.
+QuantumSafe Chat is an educational proof of concept for browser-side post-quantum key establishment and encrypted messaging. This build keeps the chat UI and adds a Research Lab with live cryptographic tracing, a measured ML-KEM-768/X25519 comparison, and focused security tests.
 
-## What it does
+> **Scope:** experimental project, not a production-secure messenger. Public-key identity authentication, a reviewed forward-secrecy protocol, account recovery, and a full protocol replay defense are not implemented.
 
-- Username/password registration and login.
-- ML-KEM-768 key generation in the browser.
-- Client-side per-message key establishment using ML-KEM encapsulation, HKDF-SHA-256 key derivation, and AES-256-GCM message encryption.
-- WebSocket relay of encrypted message envelopes.
-- Salted scrypt password hashes on the backend.
-- HttpOnly, SameSite session cookies, marked Secure in production.
-- Basic in-memory login throttling: after 8 failed attempts from an IP within the current window, further attempts are blocked for 15 minutes.
-- ML-KEM private keys are encrypted with AES-256-GCM using a password-derived PBKDF2-HMAC-SHA-256 key (600,000 iterations). The encrypted key bundle is stored on the server and locally, allowing the same account to unlock the same key on another browser after a successful login.
-- One-time migration for accounts created before encrypted server-side key bundles existed: users must log in on the original browser once so the existing key can be wrapped and uploaded.
-- The server never receives the unwrapped private key. The bundle itself is encrypted client-side before transmission, but account/password compromise or malicious JavaScript remains in scope as a risk.
-- Security response headers, a Content Security Policy, and `Cache-Control: no-store` on API responses.
-- Duplicate recipient-envelope detection plus client message IDs that make reconnect retries idempotent, preventing the same acknowledged send from being stored twice. This is still not full protocol-level replay protection.
-- Live contact/presence updates, per-conversation message caching, race-safe history loading, reconnect backoff, and pending-send retry.
-- Drafts are preserved when switching conversations and cleared only after the server confirms a message was saved.
-- Optional `DATA_DIR` environment variable so the JSON store can live on a mounted persistent volume; startup attempts a one-time copy from the old local `data/store.json` if the file is still available.
-- Render-compatible binding on `0.0.0.0` and `process.env.PORT`.
+## Features
 
-## Run locally
+- Username/password accounts; password verifiers use salted Node.js `scrypt`.
+- Browser-side ML-KEM-768 key generation, encapsulation and decapsulation using the `mlkem` package.
+- HKDF-SHA-256 key derivation and AES-256-GCM message encryption/decryption using Web Crypto.
+- Sender-history and recipient-specific encrypted message envelopes; backend stores/relays envelopes and visible metadata.
+- Password-encrypted ML-KEM private-key bundles: PBKDF2-HMAC-SHA-256 with 600,000 iterations wraps the private key using AES-256-GCM. The server stores only the encrypted bundle.
+- Live contacts/presence, per-conversation message cache, reconnection and pending-send retry.
+- **Crypto Trace:** actual operation timings, byte sizes, public-key fingerprint, encrypted private-key bundle metadata, and a recent actual envelope preview. Raw private keys, wrapping keys, shared secrets, and plaintext are not displayed.
+- **Benchmark Lab:** measured ML-KEM-768 key generation/encapsulation/decapsulation versus a browser Web Crypto X25519 ECDH baseline. Same HKDF and AES-GCM implementation is used after key establishment, with a fixed 1 KiB payload. Includes warm-up samples, mean, median, p95, standard deviation, raw-sample CSV and JSON report export.
+- **Security Tests:** a valid AES-GCM round trip, modified-ciphertext rejection, wrong-password rejection for an encrypted key bundle, and mismatched ML-KEM key/decryption rejection.
+- Ember & Brass warm interface.
 
-Requires Node.js 20+.
+## Requirements
 
-```bash
+- Node.js 20 or newer
+- npm
+- A modern browser with Web Crypto support. The X25519 benchmark depends on browser support for the Web Crypto X25519 algorithm; unsupported is reported as unavailable rather than replaced with fake values.
+
+## Local development
+
+```powershell
 npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite. The development frontend and backend run as separate processes. For the production-shaped local test:
+Open the local URL printed by Vite (normally `http://127.0.0.1:5173`). Create two test accounts in separate browser profiles to demonstrate messaging.
 
-```bash
+Production-shaped local run:
+
+```powershell
 npm run build
 npm start
 ```
 
 Then open `http://127.0.0.1:3000`.
 
-## Render settings
+## Research Lab walkthrough
 
-- Build command: `npm install --include=dev && npm run build`
-- Start command: `npm start`
+1. Register or log in using a test account.
+2. Open **Crypto Trace**. Public-key data and password-encrypted private-key bundle information are shown when available. Send a test message, then inspect the captured KEM ciphertext, salt, IV, AES-GCM ciphertext and actual timings.
+3. Open **Benchmark Lab**. Run at least 100 samples after warm-up; repeat the run. Export the raw CSV and JSON report. Record browser/OS/device, date and source revision with the result.
+4. Open **Security Tests** and run the tests. A PASS means the observed behavior matched that test's expected outcome; it is not a security certification.
+
+## Benchmark methodology and caveats
+
+- Timings are measured in the current browser/device with `performance.now()` and Web Crypto. They are implementation/API wall-clock timings, not hardware-independent primitive benchmarks.
+- ML-KEM exchange is measured as encapsulation plus decapsulation. The X25519 baseline is ephemeral key generation, raw public-key export, and `deriveBits` at both modeled peers against one recipient key pair. These operation boundaries are documented in the UI.
+- The baseline generates a fresh X25519 ephemeral key pair per sample. The experiment measures local cryptographic operations only; network round-trip latency is excluded.
+- The symmetric payload is 1 KiB. HKDF context info is domain-separated (`ML-KEM-768` versus `X25519`) while using the same HKDF-SHA-256 implementation; AES-256-GCM and payload are the same.
+- Web Crypto X25519 is asynchronous while the `mlkem` package operations are synchronous. Report this as browser API wall-clock latency; don't claim it isolates only the underlying mathematical primitive.
+- Byte sizes displayed as observed are taken from actual generated arrays. Standard reference sizes can be cited separately in the report.
+- No results are preloaded. If X25519 isn't available in a browser, the baseline is marked unavailable, not simulated.
+
+## Render deployment
+
+Use these settings for a Render Web Service:
+
+- **Build command:** `npm install --include=dev && npm run build`
+- **Start command:** `npm start`
 - `NODE_ENV=production`
-- `ALLOWED_ORIGINS=https://YOUR-SERVICE.onrender.com` (replace with the exact Render origin; no trailing slash)
-- Optional `DATA_DIR=/var/data` if you configure a persistent disk mounted at `/var/data` on your Render service. Use the exact mount path you configure.
+- `ALLOWED_ORIGINS=https://YOUR-SERVICE.onrender.com` (replace with the exact deployed origin)
+- If using a persistent disk mounted at `/var/data`, set `DATA_DIR=/var/data`.
 
-The server reads Render's `PORT` environment variable and listens on `0.0.0.0`. A persistent disk/managed database is needed if accounts, messages, and encrypted key bundles must survive ephemeral filesystem resets. If you add a disk to an existing deployment, configure `DATA_DIR` and redeploy; the app attempts a best-effort copy from the old `data/store.json` only if that file is still present during startup. Back up data before changing storage paths where possible.
+The server listens on `0.0.0.0` and uses the `PORT` environment variable. A current JSON store must be backed up before migration to a persistent volume. `DATA_DIR` does not turn JSON storage into a database; moving to PostgreSQL is reserved for a later phase.
 
-## Security improvements and remaining limitations
+## Storage and privacy
 
-This is an educational proof of concept, not a production-secure messenger. The ML-KEM private key is now encrypted before it is stored in browser `localStorage`: the user's password is processed with PBKDF2-HMAC-SHA-256 (600,000 iterations) to derive an AES-256-GCM wrapping key, and the private-key ciphertext uses a fresh random salt and nonce. A legacy plaintext key record is migrated after a successful login. This reduces risk from someone who can read the localStorage file without also knowing the user's password; it does not protect against malicious JavaScript running on the site, malware in an unlocked browser, weak passwords, or key theft while the key is in use. Users must re-enter their password after reloading the app to unlock the key. Older plaintext local key records are migrated the next time the user successfully logs in. If the user loses the password or local key data, key recovery is not implemented.
+- Accounts and messages are stored in a JSON file (`data/store.json` by default, or under `DATA_DIR`). Render's default filesystem is ephemeral; configure persistent storage if records must survive restarts/redeploys.
+- Passwords are not stored as plaintext; username, password salt/hash, public keys, message sender/recipient/timestamps and other metadata are readable to the server.
+- Message bodies are encrypted in the browser. The server stores encrypted envelopes, not normally the plaintext body.
+- Private-key bundles are encrypted in the browser before being uploaded. The private key is unwrapped in browser memory while in use; a malicious script running in the origin can still potentially access credentials or key material.
+- Research exports include operation metadata and timings, may include usernames in trace details and short previews of ciphertext, and exclude plaintext message bodies, raw keys and shared secrets. Review the report before sharing.
 
-The server also sends a Content Security Policy and other security response headers and marks API responses `no-store`. It validates encrypted-envelope lengths, throttles repeated login failures, and rejects duplicate recipient-envelope copies still present in retained message history. That duplicate check is only basic replay mitigation, not complete protocol-level replay protection. Public keys are not cryptographically authenticated, so a malicious server could substitute a contact key. A reviewed Double Ratchet or other forward-secrecy protocol is not implemented. Login throttling and sessions are process-local and reset on restart; throttling is not distributed across multiple instances. The JSON store contains password hashes/salts, public keys, message ciphertext and readable metadata; the entire file is not encrypted by the application. Use `DATA_DIR` to place it on a configured persistent mounted volume if available. Without persistent storage or a database, data can be lost on ephemeral hosting filesystems.
+## Known limitations
 
-Use only test accounts and non-sensitive messages. Do not claim that the whole application is production-secure or fully quantum-safe.
+- Public keys are not cryptographically authenticated; a malicious server could substitute a contact key.
+- ML-DSA identity authentication / signatures are not implemented.
+- A reviewed Double Ratchet or equivalent forward-secrecy protocol is not implemented. Fresh KEM encapsulation alone does not provide full forward secrecy against later compromise of a long-term recipient private key.
+- Duplicate-envelope detection and client message IDs provide limited duplicate/retry mitigation, not complete protocol-level replay protection.
+- Sessions and login throttling are in memory and reset on server restart.
+- JSON persistence is not a database and is not encrypted as a whole.
+- No independent security audit or formal verification has been performed.
 
-
-### Message composer shortcuts
-
-- Press **Enter** to send a message.
-- Press **Shift+Enter** to insert a newline.
-- The message composer keeps keyboard focus after re-renders.
-- Contacts and online/offline presence update live through WebSocket events.
-- Conversation history is cached per chat, incoming background messages are decrypted/cached, and stale history responses are ignored.
-- The WebSocket reconnects with exponential backoff and resends unacknowledged packets using the same message ID.
-- A draft is cleared only after the server acknowledges the message was persisted.
-- Existing account key migration: sign in on the original browser once; the encrypted key bundle is then available on other browsers for the same account.
+See `PRD.md`, `EXPERIMENT_PLAN.md`, `TEST_PLAN.md`, `THREAT_MODEL.md`, `RESEARCH-LAB.md`, and `MENTOR-DEMO.md` for the scope, methods, safety limits and demo steps.
