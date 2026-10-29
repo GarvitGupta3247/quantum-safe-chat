@@ -7,7 +7,7 @@ import * as opaque from '@serenity-kit/opaque';
 import { WebSocketServer, WebSocket } from 'ws';
 import { validatePacket } from '../src/protocol/envelope.js';
 import {
-  identityFingerprint, validOneTimePrekey, validUsername, verifyIdentityBundle, verifySignedPrekey,
+  validOneTimePrekey, validUsername, verifyIdentityBundle, verifySignedPrekey,
 } from '../src/protocol/identity.js';
 
 // Server role: OPAQUE authentication, encrypted-vault storage, public identity/prekey directory, and a
@@ -664,7 +664,6 @@ export async function createServer({
     get store() { return store; },
     serverSetup,
     dataFile,
-    identityFingerprint,
     async listen(port = 0, host = '127.0.0.1') {
       await new Promise((resolveListen) => httpServer.listen(port, host, resolveListen));
       return httpServer.address().port;

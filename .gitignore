@@ -7,3 +7,9 @@ data/store.json.tmp
 
 # Local HTTPS certificates for LAN demos; never commit private keys.
 certs/
+
+# Server secrets and data written at runtime: never commit.
+data/*
+!data/.gitkeep
+opaque-server-setup.txt
+store.v2-backup-*.json

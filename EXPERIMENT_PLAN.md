@@ -1,3 +1,8 @@
+> **Historical document (v0.5.0).** It describes the design that the v0.6 security repair replaced
+> (scrypt + PBKDF2 key bundles, unauthenticated keys, no forward secrecy). It is kept for project history
+> only and does not describe the current implementation. See [README.md](README.md) and
+> [SECURITY.md](SECURITY.md).
+
 # Experiment Plan — QuantumSafe Chat v0.5.0
 
 ## 1. Research question

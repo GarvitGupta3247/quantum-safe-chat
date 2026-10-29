@@ -1,78 +1,31 @@
-# Test Plan — QuantumSafe Chat v0.5.0
+# Test plan — QuantumSafe Chat v0.6.0
 
-## 1. Purpose
+All tests are automated. Nothing in this table is a manual checklist item.
 
-Verify the chat's key user flows and the new Research Lab's measured operations and controlled negative tests. Passing these checks is not a security certification or substitute for review.
-
-## 2. Build and startup
-
-```powershell
-npm install --include=dev
-npm run build
-npm run dev
+```bash
+npm test                                  # unit + integration + attack regression (Node)
+npm run build && npm run test:browser     # real headless Chrome against the production build
 ```
 
-For a production-shaped local run:
+## Automated suite (`npm test`, 40 tests)
 
-```powershell
-npm run build
-npm start
-```
+| File | Covers |
+| --- | --- |
+| `test/unit/protocol.test.js` | Canonical encoding ambiguity, strict Base64, identity self-signatures and hybrid verification (each half forged separately), safety numbers, AEAD binding independent of signatures, invalid ML-KEM ciphertext caught by AEAD with no state change (N2), bounded skipping, forged prekey rejection, signed-prekey rotation, strict packet schema, vault binding to username/version, password policy. |
+| `test/unit/research.test.js` | In-app self-tests pass under Node (N4); report allow-list and redaction (N1). |
+| `test/integration/messaging.test.js` | Two clients exchange messages both ways; re-login from a fresh client restores history/sessions; offline queueing and ordering; reconnection without duplicates; no plaintext/password in traffic, store or logs; third user cannot read; trace events carry no secrets (N1/N2). |
+| `test/integration/attack-key-custody.test.js` | **F1** server cannot unwrap keys from DB + captured login traffic; offline guessing needs the OPAQUE setup and costs one Argon2id per guess; **F5** wrong credentials, throttling, password policy; password change rotates the DEK and revokes sessions; one active device; vault rollback detection. |
+| `test/integration/attack-protocol.test.js` | **F2** key substitution detected (existing and new device), forged identity quarantined; **F3** relay refuses forged sender, 16 tampering variants rejected, misdirected packet rejected; **F7** replay and session-establishment replay rejected, reordering tolerated; dropped first message and simultaneous initiation. |
+| `test/integration/session-security.test.js` | **F4** forward secrecy after device compromise; classical post-compromise healing; documented first-flight limitation without one-time prekeys. |
+| `test/integration/legacy-migration.test.js` | **F9** genuine v0.5 store (built with the original `mlkem` library) migrated on a disposable copy; plaintext local keys never used and removed; migration can be disabled. |
+| `test/integration/server-hardening.test.js` | Unauthenticated access, WebSocket auth/origin, CSRF (content type + origin), CSP/headers (N3), body limits, registration validation, relay frame validation, vault compare-and-swap, logout. |
 
-Record actual command output. A successful build alone does not demonstrate messaging or cryptography works at runtime.
+## Browser test (`npm run test:browser`, 9 steps)
+Registration and login in two isolated contexts; signed delivery; replies; matching safety numbers
+and verification; in-app self-tests; benchmark; exported report free of secrets (N1); history
+after logout/login in a fresh context; zero CSP violations, console errors, third-party requests or
+passwords in any request. The test skips (exit 0) if no Chrome/Chromium/Edge is installed.
 
-## 3. Functional regression tests
-
-| ID | Test | Steps | Expected result |
-|---|---|---|---|
-| FUNC-01 | Registration | Register valid test account | Account is created; ML-KEM key generated; encrypted bundle stored |
-| FUNC-02 | Login | Log in with correct password | Browser unlocks private-key bundle and loads chat |
-| FUNC-03 | Wrong password | Enter incorrect password | Login/key unlock fails without displaying key material |
-| FUNC-04 | Multi-browser account | Register and sync a test account, then log in on another browser | Same key bundle unlocks; existing messages decrypt |
-| FUNC-05 | Two-user messaging | Two browser profiles exchange messages | Recipient decrypts; both users can see their history copies |
-| FUNC-06 | Enter-to-send | Type message and press Enter; Shift+Enter separately | Enter sends; Shift+Enter inserts newline; focus/draft behavior is normal |
-| FUNC-07 | Live presence | Register/log in second profile while first stays open | Contact/presence list updates without manual reload |
-| FUNC-08 | Background messages | Receive message while another conversation is selected | New message is cached, unread count updates, opening chat shows history |
-| FUNC-09 | Reconnect | Disconnect/reconnect network | Connection retries; pending send IDs are reused idempotently |
-| FUNC-10 | History after refresh | Refresh both profiles, revisit history | Stored encrypted envelopes decrypt when store and key bundles remain available |
-| FUNC-11 | Logout | Log out then request authenticated API | Session is no longer accepted |
-
-## 4. Crypto Trace tests
-
-| ID | Test | Expected result |
-|---|---|---|
-| TRACE-01 | Account key metadata | Public-key byte length and fingerprint reflect current browser key |
-| TRACE-02 | Encrypted private-key bundle | Shows KDF, iterations, salt/IV sizes and encrypted-key preview only; never raw private key |
-| TRACE-03 | Real message envelope | After send, view shows actual KEM ciphertext, salt, IV and AES-GCM ciphertext for a recent envelope |
-| TRACE-04 | Operation timing | Timings are captured around actual operations; no pre-filled values |
-| TRACE-05 | Report privacy | Export contains no plaintext, raw private key, wrapping key or shared secret |
-
-## 5. Benchmark tests
-
-| ID | Test | Expected result |
-|---|---|---|
-| BENCH-01 | Run default benchmark | Performs 10 warmups plus 100 measured samples per supported operation |
-| BENCH-02 | User sample count | Input is clamped to 20–500 measured samples |
-| BENCH-03 | ML-KEM consistency | Sender/receiver secret equality is checked; payload encrypt/decrypt round trip passes |
-| BENCH-04 | X25519 availability | Browser support is tested; if unsupported, baseline is marked unavailable instead of populated with fake results |
-| BENCH-05 | Statistics | Mean, median, p95, standard deviation and actual N are shown from raw timings |
-| BENCH-06 | CSV export | Export includes raw timing/size rows without keys, secrets or plaintext |
-| BENCH-07 | Protocol scope | UI states operation boundaries and that network latency is excluded |
-
-## 6. Security test screen
-
-- Valid AES-GCM round-trip must succeed.
-- Mutated ciphertext must fail authenticated decryption.
-- Wrong password must fail to unlock an encrypted test key bundle.
-- Mismatched ML-KEM private key must not decrypt the encrypted test payload.
-- Each visible PASS/FAIL must be produced from the runtime outcome.
-
-## 7. Deployment test
-
-- Confirm Render service is Live and serves the built frontend.
-- Confirm `ALLOWED_ORIGINS` exactly matches the deployed HTTPS origin.
-- Confirm storage is mounted and `DATA_DIR` points to that mount if persistence is required.
-- Test from two separate browser profiles.
-- Re-deploy only after backup and successful local build.
-
-Record each test as **Pass**, **Fail**, **Not run**, or **Blocked**. Never mark a test passed solely because code exists.
+## Not automated
+Mobile browsers, Safari and Firefox; deployment TLS configuration; load testing; long-running
+soak tests; accessibility audit.

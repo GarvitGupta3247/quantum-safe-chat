@@ -1,36 +1,36 @@
-# Upgrade to Research Lab build (v0.5.0)
+# Upgrading from v0.5.x to v0.6.0
 
-This update adds Crypto Trace, a live benchmark comparison and focused security tests while keeping the existing chat UI, key bundle format and message protocol.
+v0.6 replaces the authentication, key storage and message protocol. Old clients cannot talk to a
+v0.6 server and vice versa.
 
-## Before updating
+## Operator steps
+1. **Back up** `DATA_DIR/store.json`. (The server also writes `store.v2-backup-<timestamp>.json`
+   before converting, but keep your own copy.)
+2. Deploy v0.6 and set `OPAQUE_SERVER_SETUP` from a secret manager if possible (see SECURITY.md
+   §6.4). If you do not, it is generated into `DATA_DIR` on first start — back it up: losing it
+   locks every account out.
+3. Start the server once. It converts the store in place:
+   * scrypt hashes and PBKDF2 key bundles move under `users.<name>.legacy`;
+   * old messages move to `legacyMessages` (still encrypted, still unauthenticated).
+4. Tell users to upgrade (below). When everyone has, set `QSC_LEGACY_MIGRATION=0` and restart;
+   that closes the only endpoint that still accepts a password.
 
-1. Back up any existing JSON store and keep the current Git repository history.
-2. Do not overwrite the existing `.git` directory or force-push an unrelated commit history.
-3. Keep `NODE_ENV=production` and set `ALLOWED_ORIGINS` to the exact hosted HTTPS origin.
-4. If using a Render persistent disk, mount it at `/var/data` and set `DATA_DIR=/var/data`.
+Render settings are unchanged apart from the new variables: build `npm ci && npm run build`, start
+`npm start`, `NODE_ENV=production`, `ALLOWED_ORIGINS=https://YOUR-SERVICE.onrender.com`, optional
+persistent disk with `DATA_DIR=/var/data`.
 
-## Local test
+## User steps
+1. On the login page choose **Upgrade legacy account**.
+2. Enter the username, the **old** password, and a **new** password (≥12 characters, different
+   from the old one — the old one was visible to the v0.5 server and must be retired).
+3. The browser decrypts your old messages with your old key bundle, creates a brand-new identity,
+   registers with OPAQUE, and stores everything in your encrypted vault.
 
-After copying these files into an existing repository, run `npm install --include=dev` to reconcile `package-lock.json` with the bumped package version/dependencies, then commit the updated lockfile.
-
-```powershell
-npm install --include=dev
-npm run build
-npm run dev
-```
-
-Test registration/login, two-user messages, key-bundle unlock, Crypto Trace, the benchmark, the security tests and report exports before pushing.
-
-## Render settings
-
-- Build: `npm install --include=dev && npm run build`
-- Start: `npm start`
-- Environment: `NODE_ENV=production`
-- Environment: `ALLOWED_ORIGINS=https://YOUR-SERVICE.onrender.com`
-- Optional persistent disk: `DATA_DIR=/var/data`
-
-The JSON store is still used in this phase; database migration is intentionally deferred.
-
-## Known limits
-
-The UI and research tools don't change the underlying security scope: no ML-DSA identity authentication, no reviewed Double Ratchet/forward-secrecy implementation, incomplete protocol-level replay protection, and no independent security audit. Benchmark timing is browser/device/API-specific and X25519 is reported unavailable when the browser does not support it.
+What to expect:
+* Old messages appear marked **legacy — sender not authenticated**; v0.5 could not prove who sent them.
+* Your contacts see a new identity for you on first contact. Compare safety numbers.
+* Accounts that never synced a key bundle to the server (pre-v0.4) can upgrade, but their old
+  messages cannot be decrypted and are reported as unreadable.
+* Users who have not upgraded are shown as *needs upgrade* and cannot receive new messages.
+* An unencrypted private key left in the browser by a pre-v0.4 build is never used; the login page
+  offers to delete it, and upgrading deletes it.
